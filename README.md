@@ -4,28 +4,23 @@ This repository only publishes [HBAI-Ltd/Toonflow-app](https://github.com/HBAI-L
 
 It does not vendor Toonflow source code or maintain a duplicate Dockerfile. GitHub Actions builds directly from the upstream release tag and uses the Dockerfile shipped by `HBAI-Ltd/Toonflow-app`.
 
-## Local Build
+## Local Run
 
-For local testing, keep `Toonflow-app` next to this repository and build with Docker Compose:
+Run the published GHCR image with Docker Compose:
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose up -d
 ```
 
-By default, compose uses `../Toonflow-app` as the build context. Change `TOONFLOW_APP_CONTEXT` in `.env` if your local Toonflow checkout lives somewhere else.
-
-Or build manually from the upstream repository:
+Or run the image manually:
 
 ```bash
-docker build -t toonflow-app:v1.1.7 \
-  "https://github.com/HBAI-Ltd/Toonflow-app.git#v1.1.7"
-
 docker run -d \
   --name toonflow \
   -p 10588:10588 \
   -v "$(pwd)/data:/app/data" \
-  toonflow-app:v1.1.7
+  ghcr.io/uniqueding/toonflow-app:latest
 ```
 
 Open `http://localhost:10588/index.html`.
