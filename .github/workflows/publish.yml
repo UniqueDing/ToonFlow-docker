@@ -1,6 +1,6 @@
 name: Publish Toonflow image
 
-on:
+"on":
   # Optional near-real-time trigger. This only works if the upstream repo sends
   # a repository_dispatch event to this packaging repo after publishing a release.
   repository_dispatch:
