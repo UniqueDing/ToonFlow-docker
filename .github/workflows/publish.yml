@@ -1,0 +1,159 @@
+name: Publish Toonflow image
+
+on:
+  # Optional near-real-time trigger. This only works if the upstream repo sends
+  # a repository_dispatch event to this packaging repo after publishing a release.
+  repository_dispatch:
+    types:
+      - upstream-release
+
+  # Manual backfill/rebuild path. Leave toonflow_version empty to use the latest
+  # stable upstream release, or set force=true to rebuild an existing image tag.
+  workflow_dispatch:
+    inputs:
+      toonflow_version:
+        description: "Upstream Toonflow tag, for example v1.1.7. Leave empty to use latest release."
+        required: false
+        type: string
+      force:
+        description: "Build even if the image tag already exists."
+        required: false
+        default: false
+        type: boolean
+
+  # Automatic polling path for upstream releases. A separate repo cannot listen
+  # directly to another repo's release event, so polling is the default fallback.
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  # Needed to read this packaging repo and publish images to GHCR with GITHUB_TOKEN.
+  contents: read
+  packages: write
+
+env:
+  UPSTREAM_REPO: HBAI-Ltd/Toonflow-app
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout packaging repository
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.toonflow_version }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.tag }}
+        run: |
+          set -euo pipefail
+
+          # Release precedence: upstream dispatch payload > manual input > latest stable release.
+          if [ -n "${DISPATCH_VERSION}" ]; then
+            tag="${DISPATCH_VERSION}"
+            prerelease="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${tag}" --jq '.prerelease')"
+          elif [ -n "${INPUT_VERSION}" ]; then
+            tag="${INPUT_VERSION}"
+            prerelease="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${tag}" --jq '.prerelease')"
+          else
+            tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+            prerelease="false"
+          fi
+
+          if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+            echo "No upstream release tag found" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/toonflow-app"
+
+          # Semver tags get convenience aliases like 1 and 1.2. Non-semver tags
+          # are still published with exact tag/version names only.
+          if printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            major="${version%%.*}"
+            minor="${version%.*}"
+            semver="true"
+          else
+            major=""
+            minor=""
+            semver="false"
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "semver=${semver}" >> "$GITHUB_OUTPUT"
+          echo "major=${major}" >> "$GITHUB_OUTPUT"
+          echo "minor=${minor}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check existing image tag
+        id: existing
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # Keep scheduled runs idempotent: if the exact version already exists,
+          # skip the expensive Docker build unless a manual force build requested it.
+          if [ "${FORCE}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "Image ${IMAGE}:${VERSION} already exists; skipping build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.existing.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        if: steps.existing.outputs.build == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.release.outputs.image }}
+          tags: |
+            # Always publish immutable exact tags for traceability.
+            type=raw,value=${{ steps.release.outputs.version }}
+            type=raw,value=${{ steps.release.outputs.tag }}
+
+            # Only stable semver releases should move broad aliases.
+            type=raw,value=${{ steps.release.outputs.minor }},enable=${{ steps.release.outputs.semver == 'true' && steps.release.outputs.prerelease != 'true' }}
+            type=raw,value=${{ steps.release.outputs.major }},enable=${{ steps.release.outputs.semver == 'true' && steps.release.outputs.prerelease != 'true' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.prerelease != 'true' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPO }}
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+
+      - name: Build and push image
+        if: steps.existing.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          # Build directly from the upstream release tag so this repo does not
+          # duplicate or drift from Toonflow-app's own Dockerfile.
+          context: https://github.com/${{ env.UPSTREAM_REPO }}.git#${{ steps.release.outputs.tag }}
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
