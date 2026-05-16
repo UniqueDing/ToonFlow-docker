@@ -1,0 +1,14 @@
+services:
+  toonflow:
+    build:
+      context: ${TOONFLOW_APP_CONTEXT:-../Toonflow-app}
+    image: toonflow:${TOONFLOW_VERSION:-local}
+    ports:
+      - "${TOONFLOW_PORT:-10588}:10588"
+    environment:
+      NODE_ENV: prod
+      PORT: 10588
+      OSSURL: ${OSSURL:-http://127.0.0.1:10588/}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
